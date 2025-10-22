@@ -1,36 +1,35 @@
-"""Local LLM and embedding utilities backed by Ollama and SentenceTransformers."""
+"""Local LLM and embedding utilities backed by Ollama."""
 
 from __future__ import annotations
 
-import threading
 from functools import lru_cache
-from typing import List
+from typing import List, Union
 
 import ollama
-from sentence_transformers import SentenceTransformer
+
+# Default local embedding model served by Ollama
+_EMBED_MODEL = "nomic-embed-text"
 
 
-_embedding_lock = threading.Lock()
-_embedding_model: SentenceTransformer | None = None
-
-
-def _load_embedding_model() -> SentenceTransformer:
-    """Load the sentence transformer lazily to avoid heavy startup cost."""
-    global _embedding_model
-    with _embedding_lock:
-        if _embedding_model is None:
-            _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _embedding_model
+def _embed(text: str) -> List[float]:
+    """Embed a single text using the locally served Ollama model."""
+    response = ollama.embeddings(model=_EMBED_MODEL, prompt=text)
+    embedding = response.get("embedding")
+    if embedding is None:
+        raise ValueError("Ollama embeddings response missing 'embedding' payload.")
+    return embedding
 
 
 def generate_response(prompt: str, model: str = "llama3") -> str:
     """
-    Generate natural language completions using the local Ollama model.
+    Generate a natural language completion using the local Ollama model.
 
     Parameters
     ----------
-    prompt:
+    prompt : str
         Full text prompt passed to the llama3 model.
+    model : str, optional
+        Model name served by Ollama (default: 'llama3').
     """
     response = ollama.generate(model=model, prompt=prompt)
     return response["response"].strip()
@@ -38,19 +37,31 @@ def generate_response(prompt: str, model: str = "llama3") -> str:
 
 @lru_cache(maxsize=1024)
 def _cached_embedding(text: str) -> List[float]:
-    """Memoize embeddings for repeated segments."""
-    model = _load_embedding_model()
-    embedding = model.encode(text, convert_to_numpy=True).tolist()
-    return embedding
+    """Cache embeddings for repeated string inputs."""
+    return _embed(text)
 
 
-def get_embeddings(text: str) -> List[float]:
+def get_embeddings(input_text: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
     """
-    Compute deterministic embeddings for a text snippet.
+    Compute deterministic embeddings for one or more text snippets.
 
     Parameters
     ----------
-    text:
-        The text to embed in vector space.
+    input_text : str | List[str]
+        Single text or list of texts to embed in vector space.
+
+    Returns
+    -------
+    List[float] | List[List[float]]
+        Embedding vector(s) corresponding to the input text(s).
     """
-    return _cached_embedding(text)
+    if isinstance(input_text, list):
+        # Handle list of texts by embedding each individually
+        vectors = []
+        for t in input_text:
+            # Convert to string before caching to ensure hashability
+            vectors.append(_cached_embedding(str(t)))
+        return vectors
+    else:
+        # Single string input
+        return _cached_embedding(str(input_text))
